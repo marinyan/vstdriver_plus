@@ -1,4 +1,4 @@
-# vstdriver_plus — 4-port VST MIDI driver
+# vstdriver plus — 4-port VST MIDI driver
 
 This edition is based on [Falcosoft's Falcomod](https://github.com/Falcosoft/vstdriver)
 (commit `0069a1682b06e45746635daaa8b5a8ce468146a6`), building on Arakula's vstdriver.
