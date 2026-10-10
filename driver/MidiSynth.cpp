@@ -17,7 +17,7 @@
 
 
 #include "stdafx.h"
-#include "VSTDriver.h"
+#include "VSTDriverRack.h"
 #include "AudioDrivers.h"
 #include <string>
 #include <math.h>
@@ -131,13 +131,22 @@ namespace VSTMIDIDRV {
 
 
 #pragma region MidiStream class	
-	MidiStream::MidiStream() : stream() {
+	MidiStream::MidiStream() : startpos(0), endpos(0), stream() {
 		Reset();
 	}
 
-	void MidiStream::Reset() {
-		startpos = 0;
-		endpos = 0;
+	void MidiStream::Reset(DWORD port) {
+        unsigned writepos = startpos;
+        for (unsigned readpos = startpos; readpos != endpos; readpos = (readpos + 1) % maxPos) {
+            if (port == DWORD(-1) || (stream[readpos].port_type & 0x7fffffff) == port) {
+                free(stream[readpos].sysex);
+            } else {
+                stream[writepos] = stream[readpos];
+                writepos = (writepos + 1) % maxPos;
+            }
+        }
+        endpos = writepos;
+		if (startpos == endpos) startpos = endpos = 0;
 	}
 
 	DWORD MidiStream::PutMessage(DWORD port, DWORD msg, DWORD timestamp) {
@@ -332,10 +341,10 @@ namespace VSTMIDIDRV {
 			chunkSize = bufferSize / 4;
 		}
 
-		midiVol[0] = 1.0f;
-		midiVol[1] = 1.0f;
-		statusBuff[0] = 0;
-		statusBuff[1] = 0;
+		for (unsigned port = 0; port < VST_MIDI_PORTS; ++port) {
+			midiVol[port] = 1.0f;
+			statusBuff[port] = 0;
+		}
 		isSinglePort32Ch = false;
 		virtualPortNum = 0;
 
@@ -377,11 +386,13 @@ namespace VSTMIDIDRV {
 
 		if (!vstDriver)
 		{
-			vstDriver = new VSTDriver;
+			vstDriver = new VSTDriverRack;
 			if (!vstDriver->OpenVSTDriver(NULL, sampleRate))
 			{
 				delete vstDriver;
 				vstDriver = NULL;
+				if (useAsio && bassAsioOut) bassAsioOut->Close();
+				if (!useAsio && waveOut) waveOut->Close();
 				return 1;
 			}
 
@@ -399,6 +410,7 @@ namespace VSTMIDIDRV {
 		InitDialog(uDeviceID);
 
 		framesRendered = 0;
+		midiStream->Reset();
 
 		// Start playing stream
 		if (useAsio) {
@@ -548,7 +560,7 @@ namespace VSTMIDIDRV {
 		{
 			ScopeLock<Win32Lock> scopeLock(&synthLock);
 			vstDriver->ResetDriver(uDeviceID);
-			midiStream->Reset();
+			midiStream->Reset(uDeviceID);
 			statusBuff[uDeviceID] = 0;
 			isSinglePort32Ch = false;
 			virtualPortNum = 0;

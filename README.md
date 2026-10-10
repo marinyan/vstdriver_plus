@@ -1,3 +1,46 @@
+# vstdriver_plus — 4-port VST MIDI driver
+
+This edition is based on [Falcosoft's Falcomod](https://github.com/Falcosoft/vstdriver)
+(commit `0069a1682b06e45746635daaa8b5a8ce468146a6`), building on Arakula's vstdriver.
+It adds four native WinMM MIDI ports (A–D), selectable port enablement, and optional
+independent VST2 instruments for each port. Disabling individual settings applies
+the Basic VST to every enabled port while preserving each port's saved path.
+
+## 謝辞 / Acknowledgements
+
+Falcosoft / Zoltán Bacskó に深く感謝します。Falcomodでの音声出力、MIDIタイミング、
+互換性などの改良とソースコードの公開が、今回の低遅延動作と機能追加の土台になっています。
+Chris Moeller、Brad Miller、Christopher Snowhill (kode54)、Hermann Seib (Arakula)、
+DB50XG、およびその他のvstdriver貢献者にも感謝します。
+
+Many thanks to Falcosoft for the Falcomod improvements and for making the source
+available, and to all original vstdriver contributors. These additional changes
+are maintained in vstdriver_plus; this is not an official upstream release.
+Original copyright notices and licenses are retained below and in LICENSE.txt.
+
+## Building this edition
+
+Tested toolchain: Visual Studio 2026 C++/ATL (v145), Windows SDK 10.0.26100.0,
+and NSIS 3.11. Clone with submodules (`git clone --recursive`). Then run:
+
+```powershell
+.\build-installer.ps1 -NsisPath 'C:\Program Files (x86)\NSIS\makensis.exe'
+```
+
+This builds the x86/x64 driver, both VST bridge hosts, the configuration tools,
+and the registration plugin, then creates `dist/vstdriver_plus-2.6.1.2-Setup.exe`.
+The installer targets x86/x64 Windows 10/11 and retains existing user settings.
+SGP2 and other VST instruments are not included. The bundled BASSASIO binary has
+its own license; see [installation notes and acknowledgements](installer/README-ja.txt).
+
+The new installer uses standard NSIS plugins and does not need LockedList.
+Run `build-installer.ps1 -SkipBuild -TestInstaller` followed by
+`python tests/installer-test.py` for isolated file installation, upgrade, rollback,
+loaded-DLL update and uninstall tests. This test build skips real device/registry
+registration; a clean Windows installation still requires a separate smoke test.
+
+## Upstream documentation
+
 # vstdriver - MIDI synthesizer driver for VST Instruments
 
 A Windows user-mode software MIDI synthesizer driver which is capable of using any 32 or 64 bit VST Instrument

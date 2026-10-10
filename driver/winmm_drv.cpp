@@ -23,13 +23,27 @@
 
 extern "C" { HINSTANCE hinst_vst_driver = NULL; }
 
-#define MAX_DRIVERS 2
+#include "../common/ports.h"
+#define MAX_DRIVERS VST_MIDI_PORTS
 #define MAX_CLIENTS 8 // Per driver
 
 static VSTMIDIDRV::MidiSynth& midiSynth = VSTMIDIDRV::MidiSynth::getInstance();
 static bool synthOpened = false;
 //static HWND hwnd = NULL;
 static int driverCount;
+
+// Freeze the enumeration for this process so changing Config cannot reroute
+// existing WinMM handles. New MIDI applications see the new selection.
+static DWORD enumeratedPortMask = ~0u;
+static DWORD portMap[MAX_DRIVERS];
+static DWORD exposedPorts;
+static void InitPortMap() {
+    if (enumeratedPortMask != ~0u) return;
+    enumeratedPortMask = ReadEnabledPortMask();
+    exposedPorts = 0;
+    for (DWORD port = 0; port < MAX_DRIVERS; ++port)
+        if (enumeratedPortMask & (1u << port)) portMap[exposedPorts++] = port;
+}
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved ){
 	if (fdwReason == DLL_PROCESS_ATTACH){
@@ -142,7 +156,12 @@ HRESULT modGetCaps(UINT uDeviceID, PVOID capsPtr, DWORD capsSize) {
 	  
 		//MIDIOUTCAPS2 extra
 		myCaps2[uDeviceID].ManufacturerGuid = VSTMidiDrvManufacturerGuid;
-		myCaps2[uDeviceID].ProductGuid = uDeviceID ? VSTMidiDrvPortBGuid : VSTMidiDrvPortAGuid;
+		static const GUID guids[MAX_DRIVERS] = {
+            VSTMidiDrvPortAGuid, VSTMidiDrvPortBGuid,
+            {0xdee349cd, 0x7256, 0x4754, {0xa4,0xf5,0x48,0xa6,0x8d,0x7b,0x88,0x48}},
+            {0x6b004dd5, 0x8c9e, 0x4b98, {0xab,0x91,0xfb,0x33,0xdb,0x30,0x10,0xa7}}
+        };
+        myCaps2[uDeviceID].ProductGuid = guids[uDeviceID];
 	}
 
 	memcpy(capsPtr, &myCaps2[uDeviceID], min(sizeof(MIDIOUTCAPS2), capsSize));
@@ -175,7 +194,7 @@ LONG OpenDriver(Driver *driver, UINT uDeviceID, UINT uMsg, DWORD_PTR dwUser, DWO
 	driver->clients[clientNum].flags = HIWORD(dwParam2);
 	driver->clients[clientNum].callback = desc->dwCallback;
 	driver->clients[clientNum].instance = desc->dwInstance;
-	*(LONG *)dwUser = clientNum;
+	*(DWORD_PTR *)dwUser = clientNum;
 	driver->clientCount++;
 	DoCallback(uDeviceID, clientNum, MOM_OPEN, NULL, NULL);
 	return MMSYSERR_NOERROR;
@@ -193,7 +212,12 @@ LONG CloseDriver(Driver *driver, UINT uDeviceID, UINT uMsg, DWORD_PTR dwUser, DW
 
 EXTERN_C DWORD WINAPI modMessage(DWORD uDeviceID, DWORD uMsg, DWORD_PTR dwUser, DWORD_PTR dwParam1, DWORD_PTR dwParam2) {
 	
-	if (uDeviceID >= MAX_DRIVERS) return MMSYSERR_BADDEVICEID;
+	InitPortMap();
+    if (uMsg == MODM_GETNUMDEVS) return exposedPorts;
+    if (uDeviceID >= exposedPorts) return MMSYSERR_BADDEVICEID;
+    uDeviceID = portMap[uDeviceID];
+    if ((uMsg == MODM_CLOSE || uMsg == MODM_DATA || uMsg == MODM_LONGDATA) &&
+        dwUser >= MAX_CLIENTS) return MMSYSERR_INVALPARAM;
 
 	MIDIHDR *midiHdr;
 	Driver *driver = &drivers[uDeviceID];
@@ -202,6 +226,8 @@ EXTERN_C DWORD WINAPI modMessage(DWORD uDeviceID, DWORD uMsg, DWORD_PTR dwUser, 
 	
 	switch (uMsg) {
 	case MODM_OPEN:
+        if (!(ReadEnabledPortMask() & (1u << uDeviceID))) return MMSYSERR_NOTENABLED;
+        if (driver->clientCount >= MAX_CLIENTS) return MMSYSERR_ALLOCATED;
 		if (!synthOpened) {
 			if (midiSynth.Init(uDeviceID) != 0) return MMSYSERR_ERROR;
 			synthOpened = true;			
@@ -213,7 +239,7 @@ EXTERN_C DWORD WINAPI modMessage(DWORD uDeviceID, DWORD uMsg, DWORD_PTR dwUser, 
 		instance = NULL;		
 
 		res = OpenDriver(driver, uDeviceID, uMsg, dwUser, dwParam1, dwParam2);
-		driver->clients[*(LONG *)dwUser].synth_instance = instance;
+		if (res == MMSYSERR_NOERROR) driver->clients[*(DWORD_PTR *)dwUser].synth_instance = instance;
 		return res;
 
 	case MODM_CLOSE:

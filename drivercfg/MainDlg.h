@@ -61,6 +61,8 @@ public:
 	CView2 m_view2;
 	CView3 m_view3;
 	CView4 m_view4;
+	CViewPort m_viewPorts[VST_MIDI_PORTS];
+	int midiTabIndex = -1;
 	CButton alwaysOnTop;
 	HANDLE dialogMutex;
 
@@ -85,6 +87,7 @@ public:
 	BEGIN_MSG_MAP(CMainDlg)
 		MESSAGE_HANDLER(WM_HELP, OnHelp)
 		MESSAGE_HANDLER(WM_INITDIALOG, OnInitDialog)
+		MESSAGE_HANDLER(WM_VST_PORT_SETTINGS_CHANGED, OnPortSettingsChanged)
 		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 		COMMAND_ID_HANDLER(IDOK, OnOK)
 		COMMAND_ID_HANDLER(IDCANCEL, OnCancel)
@@ -156,28 +159,10 @@ public:
 		m_view3.Create(m_hWnd);
 		
 		m_view4.Create(m_hWnd);
+		for (unsigned p = 0; p < VST_MIDI_PORTS; ++p) { m_viewPorts[p].port = p; m_viewPorts[p].Create(m_hWnd); }
 
-		TCITEM tci = { 0 };
-		tci.mask = TCIF_TEXT;
-
-		tci.pszText = _T("VST settings");
-		m_ctrlTab.InsertItem(0, &tci, m_view1);
-		
-		tci.pszText = _T("Audio devices");		
-		m_ctrlTab.InsertItem(1, &tci, m_view3);
-
-		tci.pszText = _T("Advanced");
-		m_ctrlTab.InsertItem(2, &tci, m_view4);
-
-		if (showWindowsMidiTab)
-		{
-			tci.pszText = _T("MIDI");
-			m_ctrlTab.InsertItem(3, &tci, m_view2);
-			if (!IsWinVistaOrWin7()) m_view2.SetGroupBoxCaption(_T("Default MIDI Synth (through Coolsoft MIDI Mapper)"));
-		}
-
-
-		m_ctrlTab.SetCurSel(0);
+        RebuildTabs();
+        m_view1.UpdatePortControls();
 
 		// register object for message filtering and idle updates
 		CMessageLoop* pLoop = _Module.GetMessageLoop();
@@ -189,6 +174,35 @@ public:
 
 		return TRUE;
 	}
+
+    void RebuildTabs() {
+        m_view1.ShowWindow(SW_HIDE); m_view3.ShowWindow(SW_HIDE); m_view4.ShowWindow(SW_HIDE);
+        if (m_view2.IsWindow()) m_view2.ShowWindow(SW_HIDE);
+        for (unsigned p = 0; p < VST_MIDI_PORTS; ++p) m_viewPorts[p].ShowWindow(SW_HIDE);
+        m_ctrlTab.DeleteAllItems();
+        TCITEM item = {0}; item.mask = TCIF_TEXT;
+        item.pszText = _T("Basic"); m_ctrlTab.InsertItem(0, &item, m_view1);
+        item.pszText = _T("Audio devices"); m_ctrlTab.InsertItem(1, &item, m_view3);
+        item.pszText = _T("Options"); m_ctrlTab.InsertItem(2, &item, m_view4);
+        DWORD mask = ReadEnabledPortMask();
+        if (ReadIndividualPortVst()) {
+            for (unsigned p = 0; p < VST_MIDI_PORTS; ++p) if (mask & (1u << p)) {
+                TCHAR label[] = _T("Advanced A"); label[_countof(label) - 2] += TCHAR(p);
+                item.pszText = label;
+                m_viewPorts[p].Refresh();
+                m_ctrlTab.InsertItem(m_ctrlTab.GetItemCount(), &item, m_viewPorts[p]);
+            }
+        }
+        midiTabIndex = -1;
+        if (m_view2.IsWindow()) {
+            midiTabIndex = m_ctrlTab.GetItemCount();
+            item.pszText = _T("MIDI"); m_ctrlTab.InsertItem(midiTabIndex, &item, m_view2);
+        }
+        m_ctrlTab.SetCurSel(0);
+    }
+    LRESULT OnPortSettingsChanged(UINT, WPARAM, LPARAM, BOOL&) {
+        RebuildTabs(); return 0;
+    }
 
 	LRESULT OnTcnSelchangeTab(int idCtrl, LPNMHDR pNMHDR, BOOL& bHandled)
 	{		
@@ -205,7 +219,7 @@ public:
 		{			
 			m_view3.ShowPortBControls(usingASIO && is4chMode);	
 		}
-		else if (m_ctrlTab.GetCurSel() == 3)
+		else if (midiTabIndex >= 0 && m_ctrlTab.GetCurSel() == midiTabIndex)
 		{
 			m_view2.OnShowDialogView2(WM_INITDIALOG, 0, 0, dummy);
 		}

@@ -21,7 +21,7 @@ int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 	if(dlgMain.Create(NULL) == NULL)
 	{
 		ATLTRACE(_T("Main dialog creation failed!\n"));
-		return 0;
+		return GetLastError() ? int(GetLastError()) : 1;
 	}
 
 	dlgMain.ShowWindow(nCmdShow);

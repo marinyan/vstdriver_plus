@@ -273,12 +273,17 @@ public:
    BOOL DeleteAllItems()
    {
       while( m_ctrlViews.GetItemCount() > 0 ) m_ctrlViews.RemoveItem(0);
+      m_ctrlViews.m_iCurPos = -1;
+      m_ctrlViews.m_hWndClient = NULL;
       return TBase::DeleteAllItems();
    }
    int SetCurSel(int iTab, bool sendNotify = true)
    {
       // Trigger first tab selection
       int iLastTab = TBase::SetCurSel(iTab);
+      // Also display the first page after rebuilding a dynamic tab list.
+      BOOL handled = FALSE;
+      OnTabSelect(0, NULL, handled);
       if( iLastTab != -1 ) {
          // Tab controls will not send notifications on TCM_SETCURSEL.
          // I hate that! So I'll send it instead...

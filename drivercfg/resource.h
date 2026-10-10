@@ -62,3 +62,20 @@
 #define _APS_NEXT_SYMED_VALUE           110
 #endif
 #endif
+
+#define IDD_PORTS 150
+#define IDC_PORT_A 1100
+#define IDC_PORT_B 1101
+#define IDC_PORT_C 1102
+#define IDC_PORT_D 1103
+#define IDC_PORT_STATUS 1104
+
+#define IDC_PORT_VST_A 1110
+#define IDC_PORT_VST_D 1113
+#define IDC_PORT_BROWSE_A 1120
+#define IDC_PORT_BROWSE_D 1123
+
+#define IDC_INDIVIDUAL_VST 1130
+#define IDC_PORT_PATH 1131
+#define IDC_PORT_BROWSE 1132
+#define IDC_PORT_STATE 1133

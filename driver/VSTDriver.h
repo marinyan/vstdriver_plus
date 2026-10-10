@@ -49,6 +49,7 @@ const uint32_t ResetRequest = 255;
 
 class VSTDriver {
 private:
+	int rackPort = -1;
 	TCHAR      * szPluginPath;
 	unsigned     uPluginPlatform;
 
@@ -91,6 +92,7 @@ private:
 	void load_settings(TCHAR * szPath);
 
 public:	
+	void setRackPort(unsigned port) { rackPort = int(port); }
 	VSTDriver();
 	~VSTDriver();
 	void CloseVSTDriver();

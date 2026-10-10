@@ -18,9 +18,11 @@
 #ifndef VSTMIDIDRV_MIDISYNTH_H
 #define VSTMIDIDRV_MIDISYNTH_H
 
+#include "../common/ports.h"
+
 #undef GetMessage
 
-class VSTDriver;
+class VSTDriverRack;
 
 namespace VSTMIDIDRV {
 
@@ -56,7 +58,8 @@ namespace VSTMIDIDRV {
 
 	public:
 		MidiStream();
-		void Reset();
+		~MidiStream() { Reset(); }
+		void Reset(DWORD port = DWORD(-1));
 		DWORD PutMessage(DWORD port, DWORD msg, DWORD timestamp);
 		DWORD PutSysEx(DWORD port, const unsigned char* sysex, DWORD sysex_len, DWORD timestamp);
 		void GetMessage(DWORD& port, DWORD& message, unsigned char*& sysex, DWORD& sysex_len);
@@ -75,9 +78,9 @@ namespace VSTMIDIDRV {
 		bool useAsio;
 		bool keepLoaded;
 		float outputGain;
-		float midiVol[2];
+		float midiVol[VST_MIDI_PORTS];
 
-		unsigned char statusBuff[2]; //running status buffer
+		unsigned char statusBuff[VST_MIDI_PORTS]; //running status buffer
 		bool isSinglePort32Ch;
 		bool enableSinglePort32ChMode;
 		unsigned int virtualPortNum;
@@ -89,7 +92,7 @@ namespace VSTMIDIDRV {
 		float* bufferf;
 		DWORD framesRendered;
 
-		VSTDriver* vstDriver;
+		VSTDriverRack* vstDriver;
 		WaveOutWin32* waveOut;
 		BassAsioOut* bassAsioOut;
 		MidiStream* midiStream;

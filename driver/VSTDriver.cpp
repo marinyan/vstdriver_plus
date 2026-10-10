@@ -496,7 +496,11 @@ bool VSTDriver::process_create()
 	_tcscat_s(CmdLine, _T("\""));
 	_tcscat_s(CmdLine, bitnessStr);	
 	_tcscat_s(CmdLine, UseAsio() ? (UseWasapi() ? _T(" S") : _T(" A")) : _T(" W"));
-	if (proxyPortNum != 0 && proxyPortNum < 8) _tcscat_s(CmdLine, proxyPort);
+	if (rackPort >= 0) {
+        TCHAR args[32];
+        _stprintf_s(args, _T(" %u rack%d"), proxyPortNum, rackPort);
+        _tcscat_s(CmdLine, args);
+    } else if (proxyPortNum != 0 && proxyPortNum < 8) _tcscat_s(CmdLine, proxyPort);
 
 	if ( !CreateProcess( NULL, CmdLine, NULL, NULL, TRUE, 0, NULL, NULL, &siStartInfo, &piProcInfo ) )
 	{

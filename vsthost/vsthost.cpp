@@ -31,7 +31,8 @@ static HANDLE WIN32DEF(SetThreadDpiAwarenessContext)(HANDLE dpiContext) = NULL;
 #endif
 
 #define WM_ICONMSG ((WM_APP) + (1))
-#define MAX_PORTS 2
+#include "../common/ports.h"
+#define MAX_PORTS VST_MIDI_PORTS
 #define MAX_OUTPUTS 2
 #define MAX_PLUGINS 10
 
@@ -155,6 +156,8 @@ static struct PortState
 
 LPTSTR* argv = NULL;
 static int argc = 0;
+static unsigned hostPortCount = MAX_PORTS;
+static int rackPort = -1;
 
 static NOTIFYICONDATA nIconData = { 0 };
 static HMENU trayMenu = NULL;
@@ -310,8 +313,7 @@ void resetInputEvents()
 		}
 
 	inputEventList.position = 0;
-	inputEventList.portMessageCount[0] = 0;
-	inputEventList.portMessageCount[1] = 0;
+	memset(inputEventList.portMessageCount, 0, sizeof(inputEventList.portMessageCount));
 }
 
 void put_bytes(const void* out, uint32_t size)
@@ -689,20 +691,16 @@ void sendSysExEvent(char* sysExBytes, int size, DWORD portNum)
 	vstEvents.events[0] = (VstEvent*)&syxEvent;
 	vstEvents.numEvents = 1;
 
-	if (!portNum || portNum == PORT_ALL)
-		portState[0].pEffect->dispatcher(portState[0].pEffect, effProcessEvents, 0, 0, &vstEvents, 0);
-
-	if (portNum)
-		portState[1].pEffect->dispatcher(portState[1].pEffect, effProcessEvents, 0, 0, &vstEvents, 0);
+	for (unsigned port = 0; port < hostPortCount; ++port)
+        if (portNum == port || portNum == PORT_ALL)
+            portState[port].pEffect->dispatcher(portState[port].pEffect, effProcessEvents, 0, 0, &vstEvents, 0);
 }
 
 void sendSimpleResetEvents(DWORD portNum)
 {
-	if (!portNum || portNum == PORT_ALL)
-		portState[0].pEffect->dispatcher(portState[0].pEffect, effProcessEvents, 0, 0, &resetVstEvents, 0);
-
-	if (portNum)
-		portState[1].pEffect->dispatcher(portState[1].pEffect, effProcessEvents, 0, 0, &resetVstEvents, 0);
+	for (unsigned port = 0; port < hostPortCount; ++port)
+        if (portNum == port || portNum == PORT_ALL)
+            portState[port].pEffect->dispatcher(portState[port].pEffect, effProcessEvents, 0, 0, &resetVstEvents, 0);
 }
 
 void SendOwnReset(DWORD portNum)
@@ -857,211 +855,105 @@ void setSelectedSysExIndex(int index)
 
 void renderAudiosamples(int channelCount)
 {
-	static bool idle_started = false;
-	static std::vector<float> sample_buffer;
-	static float** float_list_in;
-	static float** float_list_out;
-	static float* float_null;
-	static float* float_out;
+    struct AudioBuffers {
+        std::vector<float> silence, samples;
+        std::vector<float*> inputs, outputs;
+    };
+    static AudioBuffers buffers[MAX_PORTS];
+    static std::vector<float> mixed;
+    static bool idle_started = false;
+    const bool tmpDoOwnReset = doOwnReset;
 
-	bool tmpDoOwnReset = doOwnReset;
+    if (blState.empty()) {
+        for (unsigned port = 0; port < hostPortCount; ++port) {
+            AEffect* effect = portState[port].pEffect;
+            effect->dispatcher(effect, effSetSampleRate, 0, 0, NULL, float(sample_rate));
+            effect->dispatcher(effect, effSetBlockSize, 0, BUFFER_SIZE, NULL, 0);
+            effect->dispatcher(effect, effMainsChanged, 0, 1, NULL, 0);
+            effect->dispatcher(effect, effStartProcess, 0, 0, NULL, 0);
+            AudioBuffers& audio = buffers[port];
+            audio.silence.assign(BUFFER_SIZE, 0.0f);
+            audio.samples.assign(size_t(BUFFER_SIZE) * effect->numOutputs, 0.0f);
+            audio.inputs.assign(effect->numInputs, &audio.silence[0]);
+            audio.outputs.resize(effect->numOutputs);
+            for (int output = 0; output < effect->numOutputs; ++output)
+                audio.outputs[output] = &audio.samples[size_t(output) * BUFFER_SIZE];
+        }
+        blState.resize(1); // Indicates that all effects have started processing.
+    }
+    mixed.resize(size_t(BUFFER_SIZE) * channelCount);
 
-	unsigned channelMult = (unsigned)channelCount / 2;
+    auto idleAll = []() {
+        for (unsigned port = 0; port < hostPortCount; ++port) {
+            AEffect* effect = portState[port].pEffect;
+            effect->dispatcher(effect, DECLARE_VST_DEPRECATED(effIdle), 0, 0, NULL, 0);
+        }
+    };
+    auto processAll = [](unsigned count) {
+        for (unsigned port = 0; port < hostPortCount; ++port) {
+            AEffect* effect = portState[port].pEffect;
+            AudioBuffers& audio = buffers[port];
+            effect->processReplacing(effect, audio.inputs.empty() ? NULL : &audio.inputs[0],
+                audio.outputs.empty() ? NULL : &audio.outputs[0], count);
+        }
+    };
+    if (need_idle) {
+        idleAll();
+        if (!idle_started) {
+            for (unsigned run = 0; run < 200; ++run) { processAll(BUFFER_SIZE); idleAll(); }
+        }
+    }
 
-	if (blState.empty())
-	{
-		portState[0].pEffect->dispatcher(portState[0].pEffect, effSetSampleRate, 0, 0, NULL, float(sample_rate));
-		portState[0].pEffect->dispatcher(portState[0].pEffect, effSetBlockSize, 0, BUFFER_SIZE, NULL, 0);
-		portState[0].pEffect->dispatcher(portState[0].pEffect, effMainsChanged, 0, 1, NULL, 0);
-		portState[0].pEffect->dispatcher(portState[0].pEffect, effStartProcess, 0, 0, NULL, 0);
+    for (unsigned port = 0; port < hostPortCount; ++port) {
+        PortState& state = portState[port];
+        state.renderEvents.numEvents = 0;
+        state.renderEvents.reserved = 0;
+        for (unsigned event = 0; event < inputEventList.position; ++event)
+            if (inputEventList.events[event].port == port)
+                state.renderEvents.events[state.renderEvents.numEvents++] = (VstEvent*)&inputEventList.events[event].ev;
+        if (state.renderEvents.numEvents)
+            state.pEffect->dispatcher(state.pEffect, effProcessEvents, 0, 0, &state.renderEvents, 0);
+    }
+    if (tmpDoOwnReset) SendOwnReset(destPort);
+    if (need_idle) {
+        idleAll();
+        if (!idle_started) {
+            for (unsigned port = 0; port < hostPortCount; ++port) {
+                PortState& state = portState[port];
+                if (state.renderEvents.numEvents)
+                    state.pEffect->dispatcher(state.pEffect, effProcessEvents, 0, 0, &state.renderEvents, 0);
+            }
+            if (tmpDoOwnReset) SendOwnReset(destPort);
+            idle_started = true;
+        }
+    }
 
-		portState[1].pEffect->dispatcher(portState[1].pEffect, effSetSampleRate, 0, 0, NULL, float(sample_rate));
-		portState[1].pEffect->dispatcher(portState[1].pEffect, effSetBlockSize, 0, BUFFER_SIZE, NULL, 0);
-		portState[1].pEffect->dispatcher(portState[1].pEffect, effMainsChanged, 0, 1, NULL, 0);
-		portState[1].pEffect->dispatcher(portState[1].pEffect, effStartProcess, 0, 0, NULL, 0);
-
-		size_t buffer_size = sizeof(float*) * (size_t)(portState[0].pEffect->numInputs + portState[0].pEffect->numOutputs * channelCount); // float lists
-		buffer_size += sizeof(float) * BUFFER_SIZE;                                // null input
-		buffer_size += sizeof(float) * BUFFER_SIZE * portState[0].pEffect->numOutputs * channelCount;          // outputs
-
-		blState.resize(buffer_size);
-
-		float_list_in = (float**)(blState.size() ? &blState.front() : NULL);
-
-		float_list_out = float_list_in + portState[0].pEffect->numInputs;
-		float_null = (float*)(float_list_out + portState[0].pEffect->numOutputs * channelCount);
-		float_out = float_null + BUFFER_SIZE;
-
-		for (VstInt32 i = 0; i < portState[0].pEffect->numInputs; ++i)      float_list_in[i] = float_null;
-		for (VstInt32 i = 0; i < portState[0].pEffect->numOutputs * channelCount; ++i) float_list_out[i] = float_out + BUFFER_SIZE * i;
-
-		memset(float_null, 0, sizeof(float) * BUFFER_SIZE);
-
-		sample_buffer.resize((size_t)BUFFER_SIZE * MAX_OUTPUTS * channelMult);
-	}
-
-	if (need_idle)
-	{
-		portState[0].pEffect->dispatcher(portState[0].pEffect, DECLARE_VST_DEPRECATED(effIdle), 0, 0, NULL, 0);
-		portState[1].pEffect->dispatcher(portState[1].pEffect, DECLARE_VST_DEPRECATED(effIdle), 0, 0, NULL, 0);
-
-		if (!idle_started)
-		{
-			unsigned idle_run = BUFFER_SIZE * 200;
-
-			while (idle_run)
-			{
-				unsigned count_to_do = min(idle_run, BUFFER_SIZE);
-				unsigned num_outputs = min(portState[0].pEffect->numOutputs, MAX_OUTPUTS);
-
-				portState[0].pEffect->processReplacing(portState[0].pEffect, float_list_in, float_list_out, count_to_do);
-				portState[1].pEffect->processReplacing(portState[1].pEffect, float_list_in, float_list_out + num_outputs, count_to_do);
-
-				portState[0].pEffect->dispatcher(portState[0].pEffect, DECLARE_VST_DEPRECATED(effIdle), 0, 0, NULL, 0);
-				portState[1].pEffect->dispatcher(portState[1].pEffect, DECLARE_VST_DEPRECATED(effIdle), 0, 0, NULL, 0);
-
-				idle_run -= count_to_do;
-			}
-		}
-	}
-
-	if (inputEventList.position)
-	{
-		if (inputEventList.portMessageCount[0])
-		{
-			portState[0].renderEvents.numEvents = inputEventList.portMessageCount[0];
-			portState[0].renderEvents.reserved = 0;
-
-			for (unsigned i = 0, j = 0; i < inputEventList.position && j < inputEventList.portMessageCount[0]; i++)
-			{
-				if (!inputEventList.events[i].port) portState[0].renderEvents.events[j++] = (VstEvent*)&inputEventList.events[i].ev;
-			}
-
-			portState[0].pEffect->dispatcher(portState[0].pEffect, effProcessEvents, 0, 0, &portState[0].renderEvents, 0);
-		}
-
-		if (inputEventList.portMessageCount[1])
-		{
-			portState[1].renderEvents.numEvents = inputEventList.portMessageCount[1];
-			portState[1].renderEvents.reserved = 0;
-
-			for (unsigned i = 0, j = 0; i < inputEventList.position && j < inputEventList.portMessageCount[1]; i++)
-			{
-				if (inputEventList.events[i].port) portState[1].renderEvents.events[j++] = (VstEvent*)&inputEventList.events[i].ev;
-			}
-
-			portState[1].pEffect->dispatcher(portState[1].pEffect, effProcessEvents, 0, 0, &portState[1].renderEvents, 0);
-		}
-	}
-
-	if (tmpDoOwnReset) SendOwnReset(destPort);
-
-	if (need_idle)
-	{
-		portState[0].pEffect->dispatcher(portState[0].pEffect, DECLARE_VST_DEPRECATED(effIdle), 0, 0, NULL, 0);
-		portState[1].pEffect->dispatcher(portState[1].pEffect, DECLARE_VST_DEPRECATED(effIdle), 0, 0, NULL, 0);
-
-
-		if (!idle_started)
-		{
-			if (inputEventList.portMessageCount[0]) portState[0].pEffect->dispatcher(portState[0].pEffect, effProcessEvents, 0, 0, &portState[0].renderEvents, 0);
-			if (inputEventList.portMessageCount[1]) portState[1].pEffect->dispatcher(portState[1].pEffect, effProcessEvents, 0, 0, &portState[1].renderEvents, 0);
-			if (tmpDoOwnReset) SendOwnReset(destPort);
-			idle_started = true;
-		}
-	}
-
-	uint32_t count = get_code();
-	sample_pos += count;
-
-	if (!driverResetRequested)
-		put_code(Response::NoError);
-	else
-		put_code(Response::ResetRequest);
-
-	while (count)
-	{
-		unsigned count_to_do = min(count, BUFFER_SIZE);
-		unsigned num_outputs = min(portState[0].pEffect->numOutputs, MAX_OUTPUTS);
-
-		portState[0].pEffect->processReplacing(portState[0].pEffect, float_list_in, float_list_out, count_to_do);
-		portState[1].pEffect->processReplacing(portState[1].pEffect, float_list_in, float_list_out + num_outputs, count_to_do);
-
-		float* out = &sample_buffer.front();
-
-		if (channelCount == 2)
-		{
-			if (num_outputs == 2)
-			{
-				for (unsigned i = 0; i < count_to_do; ++i)
-				{
-					float sample = (float_out[i] + float_out[i + BUFFER_SIZE * num_outputs]);
-					out[0] = sample;
-					sample = (float_out[i + BUFFER_SIZE] + float_out[i + BUFFER_SIZE + BUFFER_SIZE * num_outputs]);
-					out[1] = sample;
-					out += 2;
-				}
-			}
-			else
-			{
-				for (unsigned i = 0; i < count_to_do; ++i)
-				{
-					float sample = (float_out[i] + float_out[i + BUFFER_SIZE * num_outputs]);
-					out[0] = sample;
-					out[1] = sample;
-					out += 2;
-				}
-			}
-
-		}
-		else
-		{
-			if (num_outputs == 2)
-			{
-				for (unsigned i = 0; i < count_to_do; ++i)
-				{
-					float sample = float_out[i];
-					out[0] = sample;
-					sample = float_out[i + BUFFER_SIZE];
-					out[1] = sample;
-
-					sample = float_out[i + BUFFER_SIZE * num_outputs];
-					out[2] = sample;
-					sample = float_out[i + BUFFER_SIZE + BUFFER_SIZE * num_outputs];
-					out[3] = sample;
-
-					out += 4;
-				}
-			}
-			else
-			{
-				for (unsigned i = 0; i < count_to_do; ++i)
-				{
-					float sample = float_out[i];
-					out[0] = sample;
-					out[1] = sample;
-
-					sample = float_out[i + BUFFER_SIZE * num_outputs];
-					out[2] = sample;
-					out[3] = sample;
-
-					out += 4;
-				}
-			}
-		}
-
-		uint32_t byteSize = count_to_do * sizeof(float) * MAX_OUTPUTS * channelMult;        
-
-		put_bytes(&sample_buffer.front(), byteSize);
-		
-		if (waveWriter.getIsRecordingStarted())
-		{			
-			waveWriter.WriteData(&sample_buffer.front(), byteSize);
-		}
-				
-		count -= count_to_do;
-	}
+    uint32_t count = get_code();
+    sample_pos += count;
+    put_code(driverResetRequested ? Response::ResetRequest : Response::NoError);
+    while (count) {
+        unsigned frames = min(count, BUFFER_SIZE);
+        processAll(frames);
+        memset(&mixed[0], 0, size_t(frames) * channelCount * sizeof(float));
+        for (unsigned port = 0; port < hostPortCount; ++port) {
+            AudioBuffers& audio = buffers[port];
+            if (audio.outputs.empty()) continue;
+            const float* left = audio.outputs[0];
+            const float* right = audio.outputs[audio.outputs.size() > 1 ? 1 : 0];
+            // Stereo sums A-D; optional four-channel audio groups A/C and B/D.
+            unsigned offset = channelCount == 4 ? (port % 2) * 2 : 0;
+            for (unsigned frame = 0; frame < frames; ++frame) {
+                mixed[frame * channelCount + offset] += left[frame];
+                mixed[frame * channelCount + offset + 1] += right[frame];
+            }
+        }
+        uint32_t bytes = frames * channelCount * sizeof(float);
+        put_bytes(&mixed[0], bytes);
+        if (waveWriter.getIsRecordingStarted()) waveWriter.WriteData(&mixed[0], bytes);
+        count -= frames;
+    }
 }
+
 #pragma endregion Utility functions
 
 #pragma region VST_Windows
@@ -1146,7 +1038,7 @@ INT_PTR CALLBACK GeneralUiProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
 			else
 			{
 #pragma warning(disable:4838) //fake warning even after casting
-				TCHAR portSign[] = { _T('A') + static_cast<TCHAR>(2 * proxyPortNum + portNum) };
+				TCHAR portSign[] = { _T('A') + static_cast<TCHAR>(2 * proxyPortNum + (rackPort >= 0 ? rackPort : portNum)) };
 #pragma warning(default:4838)
 				if (isMidiProxy) _tcscpy_s(wText, proxyPrefix);
 				_tcsncat_s(wText, _T("VST General Editor port "), _TRUNCATE);
@@ -1453,7 +1345,7 @@ INT_PTR CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			else
 			{
 #pragma warning(disable:4838) //fake warning even after casting
-				TCHAR portSign[] = { _T('A') + static_cast<TCHAR>(2 * proxyPortNum + portNum) };
+				TCHAR portSign[] = { _T('A') + static_cast<TCHAR>(2 * proxyPortNum + (rackPort >= 0 ? rackPort : portNum)) };
 #pragma warning(default:4838)
 				if (isMidiProxy) _tcscpy_s(wText, proxyPrefix);
 				_tcsncat_s(wText, _T("VST Editor port "), _TRUNCATE);
@@ -1823,8 +1715,12 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				}
 
 			trayMenu = CreatePopupMenu();
-			AppendMenu(trayMenu, MF_STRING | MF_ENABLED, PORT_MENU_OFFSET, portItem1Str);
-			AppendMenu(trayMenu, MF_STRING | MF_ENABLED, PORT_MENU_OFFSET + 1, portItem2Str);
+            for (unsigned port = 0; port < (isMidiProxy && rackPort < 0 ? 2u : hostPortCount); ++port) {
+                TCHAR label[48];
+                _stprintf_s(label, _T("%sPort %c VST Dialog"), isMidiProxy ? _T("Global ") : _T(""),
+                    TCHAR(_T('A') + 2 * proxyPortNum + (rackPort >= 0 ? rackPort : port)));
+                AppendMenu(trayMenu, MF_STRING | MF_ENABLED, PORT_MENU_OFFSET + port, label);
+            }
 			AppendMenu(trayMenu, MF_SEPARATOR, 0, _T(""));
 			AppendMenu(trayMenu, MF_POPUP, (UINT_PTR)pluginMenu, _T("Switch Plugin"));
 			AppendMenu(trayMenu, MF_SEPARATOR, 0, _T(""));
@@ -1873,6 +1769,10 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				}
 			}
 
+            if (rackPort >= 0) {
+                TCHAR label[20]; _stprintf_s(label, _T("Port %c - "), TCHAR(_T('A') + 2 * proxyPortNum + rackPort));
+                _tcscat_s(trayTip, label);
+            }
 			_tcsncat_s(trayTip, argv[3], _countof(trayTip) - _tcslen(trayTip));
 
 			_tcsncpy_s(nIconData.szTip, trayTip, _TRUNCATE);
@@ -1905,12 +1805,14 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				POINT cursorPoint;
 				//bool hasEditor = portState[0].pEffect->flags & VstAEffectFlags::effFlagsHasEditor;
 				GetCursorPos(&cursorPoint);
-				CheckMenuItem(trayMenu, PORT_MENU_OFFSET, portState[0].editorHandle != NULL && IsWindowVisible(portState[0].editorHandle) ? MF_CHECKED : MF_UNCHECKED);
-				CheckMenuItem(trayMenu, PORT_MENU_OFFSET + 1, portState[1].editorHandle != NULL && IsWindowVisible(portState[1].editorHandle) ? MF_CHECKED : MF_UNCHECKED);
-				EnableMenuItem(trayMenu, PORT_MENU_OFFSET, portState[0].isPortActive /* && hasEditor */ ? MF_ENABLED : MF_GRAYED);
-				EnableMenuItem(trayMenu, PORT_MENU_OFFSET + 1, portState[1].isPortActive /* && hasEditor*/ ? MF_ENABLED : MF_GRAYED);
-				EnableMenuItem(trayMenu, 3, (portState[0].isPortActive || portState[1].isPortActive) && !waveWriter.getIsRecordingStarted() ? MF_BYPOSITION | MF_ENABLED : MF_BYPOSITION | MF_GRAYED);
-				EnableMenuItem(trayMenu, WAVEWRITE_START_STOP, portState[0].isPortActive || portState[1].isPortActive || waveWriter.getIsRecordingStarted() ? MF_ENABLED : MF_GRAYED);
+                bool anyActive = false;
+                for (unsigned port = 0; port < hostPortCount; ++port) {
+                    CheckMenuItem(trayMenu, PORT_MENU_OFFSET + port, portState[port].editorHandle && IsWindowVisible(portState[port].editorHandle) ? MF_CHECKED : MF_UNCHECKED);
+                    EnableMenuItem(trayMenu, PORT_MENU_OFFSET + port, portState[port].isPortActive ? MF_ENABLED : MF_GRAYED);
+                    anyActive |= portState[port].isPortActive;
+                }
+                EnableMenuItem(trayMenu, (isMidiProxy && rackPort < 0 ? 2u : hostPortCount) + 1, MF_BYPOSITION | (anyActive && !ReadIndividualPortVst() && !waveWriter.getIsRecordingStarted() ? MF_ENABLED : MF_GRAYED));
+                EnableMenuItem(trayMenu, WAVEWRITE_START_STOP, anyActive || waveWriter.getIsRecordingStarted() ? MF_ENABLED : MF_GRAYED);
 
 				CheckMenuItem(trayMenu, RESET_MENU_OFFSET + 1, lastUsedSysEx == RESET_MENU_OFFSET + 1 ? MF_CHECKED : MF_UNCHECKED);
 				CheckMenuItem(trayMenu, RESET_MENU_OFFSET + 2, lastUsedSysEx == RESET_MENU_OFFSET + 2 ? MF_CHECKED : MF_UNCHECKED);
@@ -1960,6 +1862,8 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			{
 			case PORT_MENU_OFFSET:
 			case PORT_MENU_OFFSET + 1:
+			case PORT_MENU_OFFSET + 2:
+			case PORT_MENU_OFFSET + 3:
 				showVstEditor((uint32_t)wParam - PORT_MENU_OFFSET, (BOOL)lParam);
 				return 0;
 
@@ -2204,6 +2108,11 @@ int CALLBACK _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCm
 #endif		
 
 	if (argv == NULL || argc < 6) return Error::InvalidCommandLineArguments;
+    if (argc > 7 && !_tcsncmp(argv[7], _T("rack"), 4)) {
+        rackPort = _ttoi(argv[7] + 4);
+        if (rackPort < 0 || rackPort >= MAX_PORTS) return Error::InvalidCommandLineArguments;
+        hostPortCount = 1;
+    }
 
 	TCHAR* end_char = NULL;
 	unsigned in_sum = _tcstoul(argv[2], &end_char, 16);
@@ -2320,17 +2229,17 @@ int CALLBACK _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCm
 		goto exit;
 	}
 
-	portState[1].pEffect = pMain(&audioMaster);
-	if (!portState[1].pEffect)
-	{
-		code = Response::NotAVsti;
-		goto exit;
-	}
-
-	portState[1].effectData = 1;
-	portState[1].pEffect->user = &portState[1].effectData;
-
-	portState[1].pEffect->dispatcher(portState[1].pEffect, effOpen, 0, 0, NULL, 0);
+    for (unsigned port = 1; port < hostPortCount; ++port) {
+        AEffect* effect = portState[port].pEffect = pMain(&audioMaster);
+        if (!effect || effect->magic != kEffectMagic) {
+            portState[port].pEffect = NULL;
+            code = Response::NotAVsti;
+            goto exit;
+        }
+        portState[port].effectData = port;
+        effect->user = &portState[port].effectData;
+        effect->dispatcher(effect, effOpen, 0, 0, NULL, 0);
+    }
 
 	char name_string[256] = { 0 };
 	char vendor_string[256] = { 0 };
@@ -2423,8 +2332,7 @@ int CALLBACK _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCm
 			uint32_t size = get_code();
 			chunk.resize(size);
 			if (size) get_bytes(&chunk.front(), size);
-			setChunk(portState[0].pEffect, chunk);
-			setChunk(portState[1].pEffect, chunk);
+			for (unsigned port = 0; port < hostPortCount; ++port) setChunk(portState[port].pEffect, chunk);
 
 			put_code(Response::NoError);
 		}
@@ -2469,6 +2377,7 @@ int CALLBACK _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCm
 		case Command::DisplayEditorModalThreaded: // Display Editor Modal in separate thread
 		{
 			uint32_t port_num = get_code();
+            if (port_num >= hostPortCount) { code = Response::CommandUnknown; goto exit; }
 
 			put_code(Response::NoError);
 
@@ -2491,8 +2400,7 @@ int CALLBACK _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCm
 			lastUsedSysEx = getSelectedSysExIndex();
 
 			//Insert SysEx resets to the beginning of the event list to prevent all piano problems at start.
-			InsertOwnReset(0);
-			InsertOwnReset(1);
+			for (unsigned port = 0; port < hostPortCount; ++port) InsertOwnReset(port);
 
 			put_code(Response::NoError);
 
@@ -2532,6 +2440,7 @@ int CALLBACK _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCm
 		case Command::Reset: // Reset 
 		{
 			uint32_t port_num = get_code();
+            if (port_num >= hostPortCount) { code = Response::CommandUnknown; goto exit; }
 
 			destPort = port_num;
 			doOwnReset = true;
@@ -2581,7 +2490,7 @@ int CALLBACK _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCm
 
 			uint32_t b = get_code();
 
-			uint32_t port = ((b & 0x7F000000) >> 24) & 1;
+			uint32_t port = (b >> 24) & (MAX_PORTS - 1);
 			portState[port].isPortActive = true;
 			inputEventList.portMessageCount[port]++;
 
@@ -2605,7 +2514,7 @@ int CALLBACK _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCm
 
 			uint32_t size = get_code();
 
-			uint32_t port = (size >> 24) & 1;
+			uint32_t port = (size >> 24) & (MAX_PORTS - 1);
 			portState[port].isPortActive = true;
 			inputEventList.portMessageCount[port]++;
 
@@ -2658,22 +2567,16 @@ int CALLBACK _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCm
 	
 	waveWriter.Close();
 
-	if (portState[0].editorHandle != NULL) SendMessageTimeout(portState[0].editorHandle, WM_CLOSE, TRUE, TRUE, SMTO_ABORTIFHUNG | SMTO_NORMAL, 1000, NULL);
-	if (portState[1].editorHandle != NULL) SendMessageTimeout(portState[1].editorHandle, WM_CLOSE, TRUE, TRUE, SMTO_ABORTIFHUNG | SMTO_NORMAL, 1000, NULL);
-	if (trayWndHandle != NULL) SendMessageTimeout(trayWndHandle, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG | SMTO_NORMAL, 1000, NULL);
-
-	if (portState[1].pEffect)
-	{
-		if (blState.size()) portState[1].pEffect->dispatcher(portState[1].pEffect, effStopProcess, 0, 0, NULL, 0);
-		portState[1].pEffect->dispatcher(portState[1].pEffect, effClose, 0, 0, NULL, 0);
-		portState[1].pEffect = NULL;
-	}
-	if (portState[0].pEffect)
-	{
-		if (blState.size()) portState[0].pEffect->dispatcher(portState[0].pEffect, effStopProcess, 0, 0, NULL, 0);
-		portState[0].pEffect->dispatcher(portState[0].pEffect, effClose, 0, 0, NULL, 0);
-		portState[0].pEffect = NULL;
-	}
+    for (unsigned port = 0; port < hostPortCount; ++port)
+        if (portState[port].editorHandle) SendMessageTimeout(portState[port].editorHandle, WM_CLOSE, TRUE, TRUE, SMTO_ABORTIFHUNG | SMTO_NORMAL, 1000, NULL);
+    if (trayWndHandle) SendMessageTimeout(trayWndHandle, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG | SMTO_NORMAL, 1000, NULL);
+    for (int port = int(hostPortCount) - 1; port >= 0; --port) {
+        AEffect* effect = portState[port].pEffect;
+        if (!effect) continue;
+        if (!blState.empty()) effect->dispatcher(effect, effStopProcess, 0, 0, NULL, 0);
+        effect->dispatcher(effect, effClose, 0, 0, NULL, 0);
+        portState[port].pEffect = NULL;
+    }
 	resetInputEvents();
 	if (hDll) FreeLibrary(hDll);
 	CoUninitialize();

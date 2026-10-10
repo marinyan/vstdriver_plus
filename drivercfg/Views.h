@@ -8,6 +8,7 @@
 #include "../external_packages/audiodefs.h"
 #include "../driver/VSTDriver.h"
 #include "../version.h"
+#include "../common/ports.h"
 
 #ifdef _DEBUG
 #define _CRTDBG_MAP_ALLOC
@@ -391,6 +392,8 @@ public:
 
 	BEGIN_MSG_MAP(CView1)
 		MESSAGE_HANDLER(WM_INITDIALOG, OnInitDialogView1)
+        COMMAND_HANDLER(IDC_INDIVIDUAL_VST, BN_CLICKED, OnPortSettings)
+        COMMAND_RANGE_HANDLER(IDC_PORT_A, IDC_PORT_D, OnPortSettings)
 		COMMAND_ID_HANDLER(IDC_VSTLOAD,OnButtonAdd)
 		COMMAND_ID_HANDLER(IDC_VSTCONFIG,OnButtonConfig)
 		COMMAND_ID_HANDLER(IDC_UNLOAD, OnButtonUnload)
@@ -405,6 +408,40 @@ public:
 		MESSAGE_HANDLER(WM_CTLCOLORSTATIC, OnCtlColorStatic)
 		COMMAND_HANDLER(IDC_USE4CH, BN_CLICKED, OnBnClickedUse4ch)
 	END_MSG_MAP()	
+
+    void UpdatePortControls() {
+        bool individual = ReadIndividualPortVst();
+        DWORD mask = ReadEnabledPortMask();
+        SetDlgItemText(IDC_PORT_STATE, mask ? _T("ON - restart MIDI apps after changing ports/VSTs.") : _T("OFF - restart MIDI apps to disable all ports."));
+        CheckDlgButton(IDC_INDIVIDUAL_VST, individual ? BST_CHECKED : BST_UNCHECKED);
+        for (unsigned p = 0; p < VST_MIDI_PORTS; ++p)
+            CheckDlgButton(IDC_PORT_A + p, mask & (1u << p) ? BST_CHECKED : BST_UNCHECKED);
+        vst_info.EnableWindow(!individual);
+        vst_load.EnableWindow(!individual);
+        vst_configure.EnableWindow(!individual && effect != NULL);
+        vst_unload.EnableWindow(!individual && effect != NULL);
+    }
+    LRESULT OnPortSettings(WORD, WORD id, HWND, BOOL&) {
+        DWORD mask = 0;
+        for (unsigned p = 0; p < VST_MIDI_PORTS; ++p)
+            if (IsDlgButtonChecked(IDC_PORT_A + p) == BST_CHECKED) mask |= 1u << p;
+        if (WriteEnabledPortMask(mask) != ERROR_SUCCESS)
+            MessageBox(_T("Could not save port settings."), _T("VST MIDI Driver"), MB_OK | MB_ICONERROR);
+        if (id == IDC_INDIVIDUAL_VST) {
+            bool individual = IsDlgButtonChecked(id) == BST_CHECKED;
+            if (individual) {
+                TCHAR common[MAX_PATH]; ReadCommonPlugin(common);
+                for (unsigned p = 0; p < VST_MIDI_PORTS; ++p) {
+                    TCHAR path[MAX_PATH]; ReadPortPlugin(p, path);
+                    if (!path[0] && common[0]) WritePortPlugin(p, common);
+                }
+            }
+            SaveDwordValue(_T("IndividualPortVst"), individual ? 1 : 0);
+        }
+        UpdatePortControls();
+        ::PostMessage(GetAncestor(m_hWnd, GA_ROOT), WM_VST_PORT_SETTINGS_CHANGED, 0, 0);
+        return 0;
+    }
 
 	void load_settings()
 	{
@@ -820,6 +857,7 @@ public:
 	{
 		if(effect) free_vst(); // falco fix: otherwise an empty save occures at every start.
 		effect = new VSTDriver;
+		effect->setRackPort(0); // Config previews need only one instrument instance.
 		if (!effect->OpenVSTDriver(szPluginPath))
 		{
 			delete effect;
@@ -921,7 +959,7 @@ public:
 
 			TCHAR tmpBuff[64];
 			unsigned int realOffset = !info.outputs ? selectedOutputChannelInt + portBOffsetVal : (selectedOutputChannelInt + portBOffsetVal) % info.outputs;
-			_stprintf_s(tmpBuff, 64, _T("4 channel mode (port A: ASIO Ch %d/%d; port B: ASIO Ch %u/%u)"), selectedOutputChannelInt, selectedOutputChannelInt + 1, realOffset, realOffset + 1);
+			_stprintf_s(tmpBuff, 64, _T("4ch: A/C = ASIO %d/%d; B/D = ASIO %u/%u"), selectedOutputChannelInt, selectedOutputChannelInt + 1, realOffset, realOffset + 1);
 			vst_4chmode.SetWindowText(tmpBuff);
 			bool cantdo4ch = selectedOutputChannelInt == (int)realOffset;
 			if (cantdo4ch)
@@ -950,7 +988,7 @@ public:
 			if(vst_buffer_size.SelectString(-1, bufferText) == CB_ERR) 
 				vst_buffer_size.SelectString(-1, _T("80"));
 			
-			vst_4chmode.SetWindowText(_T("4 channel mode (port A: Front speakers; port B: Rear speakers)"));
+			vst_4chmode.SetWindowText(_T("4 channel audio (A/C: Front; B/D: Rear)"));
 
 			bool is48K = false;
 			UINT deviceId = GetWaveOutDeviceId();
@@ -1115,7 +1153,7 @@ public:
 			//vst_buffer_size.AddString(_T("180"));
 			vst_buffer_size.AddString(_T("200"));
 			vst_buffer_size.SelectString(-1, _T("80"));
-			vst_4chmode.SetWindowText(_T("4 channel mode (port A: Front speakers; port B: Rear speakers)"));
+			vst_4chmode.SetWindowText(_T("4 channel audio (A/C: Front; B/D: Rear)"));
 
 			bool is48K = false;
 			UINT deviceId = GetWaveOutDeviceId();
@@ -1144,7 +1182,7 @@ public:
 		if (usingASIO) 
 		{		
 			unsigned int realOffset = !info.outputs ? selectedOutputChannelInt + portBOffsetVal : (selectedOutputChannelInt + portBOffsetVal) % info.outputs;
-			_stprintf_s(tmpBuff, 64, _T("4 channel mode (port A: ASIO Ch %d/%d; port B: ASIO Ch %u/%u)"), selectedOutputChannelInt, selectedOutputChannelInt + 1, realOffset, realOffset + 1);
+			_stprintf_s(tmpBuff, 64, _T("4ch: A/C = ASIO %d/%d; B/D = ASIO %u/%u"), selectedOutputChannelInt, selectedOutputChannelInt + 1, realOffset, realOffset + 1);
 			vst_4chmode.SetWindowText(tmpBuff);
 			bool cantdo4ch = selectedOutputChannelInt == (int)realOffset;			
 			if (cantdo4ch)
@@ -1879,3 +1917,29 @@ public:
 
 #endif // !defined(AFX_VIEWS_H__20020629_8D64_963C_A351_0080AD509054__INCLUDED_)
 
+
+class CViewPort : public CDialogImpl<CViewPort> {
+public:
+    unsigned port = 0;
+    enum { IDD = IDD_PORTS };
+    BEGIN_MSG_MAP(CViewPort)
+        MESSAGE_HANDLER(WM_INITDIALOG, OnInit)
+        COMMAND_ID_HANDLER(IDC_PORT_BROWSE, OnBrowse)
+    END_MSG_MAP()
+    void Refresh() {
+        TCHAR path[MAX_PATH]; ReadPortPlugin(port, path);
+        SetDlgItemText(IDC_PORT_PATH, path);
+    }
+    LRESULT OnInit(UINT, WPARAM, LPARAM, BOOL&) { Refresh(); return TRUE; }
+    LRESULT OnBrowse(WORD, WORD, HWND, BOOL&) {
+        TCHAR path[MAX_PATH]; ReadPortPlugin(port, path);
+        CFileDialog dialog(TRUE, _T("dll"), path, OFN_FILEMUSTEXIST | OFN_HIDEREADONLY,
+            _T("VST2 instruments (*.dll)\0*.dll\0All files (*.*)\0*.*\0\0"));
+        if (dialog.DoModal() == IDOK) {
+            if (WritePortPlugin(port, dialog.m_szFileName) != ERROR_SUCCESS)
+                MessageBox(_T("Could not save this instrument."), _T("VST MIDI Driver"), MB_OK | MB_ICONERROR);
+            Refresh();
+        }
+        return 0;
+    }
+};
