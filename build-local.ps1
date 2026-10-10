@@ -1,3 +1,7 @@
+param(
+    [string]$PlatformToolset = 'v145',
+    [string]$WindowsSdkVersion = '10.0.26100.0'
+)
 $ErrorActionPreference = 'Stop'
 $buildRoot = $PSScriptRoot
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -9,7 +13,7 @@ function Build-Project($project, $platform, $target, $outRelative) {
     $logName = "$target-$platform.log"
     $buildArgs = @($project, '/m', '/nr:false', '/nologo', '/v:minimal',
         '/p:Configuration=Release', "/p:Platform=$platform",
-        '/p:PlatformToolset=v145', '/p:WindowsTargetPlatformVersion=10.0.26100.0',
+        "/p:PlatformToolset=$PlatformToolset", "/p:WindowsTargetPlatformVersion=$WindowsSdkVersion",
         '/p:UseOfMfc=false', '/p:UseOfAtl=false',
         "/p:SolutionDir=$buildRoot\", "/p:TargetName=$target",
         "/p:OutDir=$buildRoot\$outRelative\",
