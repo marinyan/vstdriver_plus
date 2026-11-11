@@ -947,7 +947,7 @@ void renderAudiosamples(int channelCount)
                 mixed[frame * channelCount + offset + 1] += right[frame];
             }
         }
-        uint32_t bytes = frames * channelCount * sizeof(float);
+        uint32_t bytes = static_cast<uint32_t>(size_t(frames) * channelCount * sizeof(float));
         put_bytes(&mixed[0], bytes);
         if (waveWriter.getIsRecordingStarted()) waveWriter.WriteData(&mixed[0], bytes);
         count -= frames;
